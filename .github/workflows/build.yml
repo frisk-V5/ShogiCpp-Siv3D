@@ -2,83 +2,227 @@ name: Build Shogi App (OpenSiv3D)
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
 
 jobs:
-  build-linux:
-    name: Build on Ubuntu (OpenSiv3D)
-    runs-on: ubuntu-22.04
+  # ══════════════════════════════════════════════════════════════
+  #  Windows ビルド → EXE を成果物として公開
+  # ══════════════════════════════════════════════════════════════
+  build-windows:
+    name: Windows EXE (MSVC + OpenSiv3D)
+    runs-on: windows-2022
 
     steps:
-      # ─── 1. ソースをチェックアウト ───
+      # 1. チェックアウト
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ─── 2. システム依存ライブラリのインストール ───
+      # 2. Visual Studio の Developer Command Prompt をセットアップ
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # 3. Ninja をインストール
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      # 4. OpenSiv3D SDK をダウンロード & 展開
+      #    公式 GitHub Releases から Windows 向け ZIP を取得
+      - name: Download OpenSiv3D SDK (Windows)
+        shell: pwsh
+        run: |
+          $sdk_url = "https://github.com/Siv3D/OpenSiv3D/releases/download/v0.6.15/OpenSiv3D_SDK_Windows_0.6.15.zip"
+          $zip     = "$env:RUNNER_TEMP\siv3d.zip"
+          $dest    = "C:\Siv3D"
+          Write-Host "Downloading OpenSiv3D SDK..."
+          Invoke-WebRequest -Uri $sdk_url -OutFile $zip -UseBasicParsing
+          Write-Host "Extracting..."
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          # 展開後のルートディレクトリ名を確認して環境変数に設定
+          $sdkRoot = (Get-ChildItem $dest | Where-Object { $_.PSIsContainer } | Select-Object -First 1).FullName
+          echo "SIV3D_ROOT=$sdkRoot" >> $env:GITHUB_ENV
+          Write-Host "SDK root: $sdkRoot"
+
+      # 5. CMake でビルド構成を生成
+      - name: Configure (CMake + MSVC)
+        shell: pwsh
+        run: |
+          cmake -B build `
+                -G Ninja `
+                -DCMAKE_BUILD_TYPE=Release `
+                -DCMAKE_C_COMPILER=cl `
+                -DCMAKE_CXX_COMPILER=cl `
+                -DSIV3D_ROOT="$env:SIV3D_ROOT"
+
+      # 6. ビルド実行
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel $env:NUMBER_OF_PROCESSORS
+
+      # 7. 必要な DLL・アセットをまとめる
+      - name: Gather runtime files
+        shell: pwsh
+        run: |
+          $out = "dist\Shogi"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          # EXE
+          Copy-Item "build\Shogi.exe" -Destination $out
+          # OpenSiv3D ランタイム DLL
+          $dllSrc = "$env:SIV3D_ROOT\bin"
+          if (Test-Path $dllSrc) {
+            Copy-Item "$dllSrc\*.dll" -Destination $out
+          }
+          # アセット (フォント等)
+          if (Test-Path "assets") {
+            Copy-Item "assets" -Destination "$out\assets" -Recurse
+          }
+          # SDK 付属アセット (engine/ フォルダ)
+          $engineSrc = "$env:SIV3D_ROOT\engine"
+          if (Test-Path $engineSrc) {
+            Copy-Item $engineSrc -Destination "$out\engine" -Recurse
+          }
+
+      # 8. 成果物をアップロード (zip で固める)
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shogi-windows-x64
+          path: dist\Shogi\
+          if-no-files-found: warn
+
+  # ══════════════════════════════════════════════════════════════
+  #  Linux ビルド → バイナリを成果物として公開
+  # ══════════════════════════════════════════════════════════════
+  build-linux:
+    name: Linux Binary (GCC + OpenSiv3D)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # システム依存ライブラリ
       - name: Install system dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
             build-essential cmake ninja-build \
             libgl1-mesa-dev libglu1-mesa-dev \
-            libx11-dev libxi-dev libxrandr-dev libxinerama-dev \
-            libxcursor-dev libxext-dev \
+            libx11-dev libxi-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxext-dev \
             libasound2-dev libpulse-dev \
             libavcodec-dev libavformat-dev libavutil-dev \
             libswresample-dev libswscale-dev \
             libturbojpeg0-dev libpng-dev \
             libfreetype6-dev libharfbuzz-dev \
-            libboost-dev \
-            libgif-dev libwebp-dev \
+            libboost-dev libgif-dev libwebp-dev \
             wget curl git unzip
 
-      # ─── 3. OpenSiv3D SDK のダウンロード & インストール ───
-      - name: Install OpenSiv3D SDK
+      # OpenSiv3D SDK (Linux)
+      - name: Download & Install OpenSiv3D SDK (Linux)
         run: |
-          # OpenSiv3D v0.6.15 Linux版をダウンロード
-          wget -q https://github.com/Siv3D/OpenSiv3D/releases/download/v0.6.15/OpenSiv3D_SDK_Linux_0.6.15.tar.gz \
+          wget -q \
+            https://github.com/Siv3D/OpenSiv3D/releases/download/v0.6.15/OpenSiv3D_SDK_Linux_0.6.15.tar.gz \
             -O /tmp/siv3d.tar.gz
           tar -xzf /tmp/siv3d.tar.gz -C /tmp
-          # SDK をシステムにコピー
-          sudo cp -r /tmp/OpenSiv3D_SDK_Linux_0.6.15/include/* /usr/local/include/
-          sudo cp -r /tmp/OpenSiv3D_SDK_Linux_0.6.15/lib/*     /usr/local/lib/
+          SDK_DIR=$(ls -d /tmp/OpenSiv3D_SDK_Linux_* | head -1)
+          sudo cp -r "$SDK_DIR/include/"* /usr/local/include/
+          sudo cp -r "$SDK_DIR/lib/"*     /usr/local/lib/
           sudo ldconfig
+          echo "SIV3D_ROOT=$SDK_DIR" >> $GITHUB_ENV
 
-      # ─── 4. CMake でビルド ───
-      - name: Configure with CMake
+      - name: Configure (CMake)
         run: |
           cmake -B build \
                 -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --config Release --parallel $(nproc)
+        run: cmake --build build --parallel $(nproc)
 
-      # ─── 5. ビルド成果物をアップロード ───
-      - name: Upload artifact
+      - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: shogi-linux
+          name: shogi-linux-x64
           path: build/Shogi
           if-no-files-found: warn
 
-  # ── Windows ビルド（ランナーで実行。SDK は手動配置が必要なためスキップ扱い） ──
-  build-windows:
-    name: Build check on Windows (compile only)
-    runs-on: windows-latest
+  # ══════════════════════════════════════════════════════════════
+  #  macOS ビルド
+  # ══════════════════════════════════════════════════════════════
+  build-macos:
+    name: macOS App (Clang + OpenSiv3D)
+    runs-on: macos-14   # Apple Silicon (M1)
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # OpenSiv3D の Windows 向け SDK は NuGet / 手動配置が必要なため
-      # ここでは構文チェックのみ実施
-      - name: Syntax check (MSVC cl /P)
-        shell: pwsh
+      - name: Install dependencies (Homebrew)
         run: |
-          Write-Host "Windows build requires OpenSiv3D SDK installed manually."
-          Write-Host "Skipping full build — performing syntax pre-process check."
-          # 実プロジェクトでは vcpkg + Siv3D SDK を配置してビルドする
-          exit 0
+          brew update
+          brew install cmake ninja boost freetype harfbuzz \
+                       ffmpeg libpng libtiff webp giflib
+
+      # macOS 向け SDK は dmg 配布 → hdiutil でマウント
+      - name: Download & Install OpenSiv3D SDK (macOS)
+        run: |
+          DMG_URL="https://github.com/Siv3D/OpenSiv3D/releases/download/v0.6.15/OpenSiv3D_SDK_macOS_0.6.15.dmg"
+          curl -L "$DMG_URL" -o /tmp/siv3d.dmg
+          hdiutil attach /tmp/siv3d.dmg -mountpoint /Volumes/Siv3D -nobrowse
+          SDK_DIR=$(ls -d /Volumes/Siv3D/OpenSiv3D_SDK_macOS_* 2>/dev/null | head -1)
+          if [ -z "$SDK_DIR" ]; then SDK_DIR="/Volumes/Siv3D"; fi
+          sudo cp -r "$SDK_DIR/include/"* /usr/local/include/ || true
+          sudo cp -r "$SDK_DIR/lib/"*     /usr/local/lib/     || true
+          hdiutil detach /Volumes/Siv3D
+
+      - name: Configure (CMake)
+        run: |
+          cmake -B build \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --parallel $(sysctl -n hw.logicalcpu)
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shogi-macos-universal
+          path: build/Shogi
+          if-no-files-found: warn
+
+  # ══════════════════════════════════════════════════════════════
+  #  リリース: タグプッシュ時に全成果物を GitHub Release に添付
+  # ══════════════════════════════════════════════════════════════
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-22.04
+    needs: [build-windows, build-linux, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      # Windows 成果物を zip に固める
+      - name: Zip Windows build
+        run: zip -r artifacts/shogi-windows-x64.zip artifacts/shogi-windows-x64/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/shogi-windows-x64.zip
+            artifacts/shogi-linux-x64/Shogi
+            artifacts/shogi-macos-universal/Shogi
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
